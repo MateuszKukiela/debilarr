@@ -52,6 +52,7 @@ class Config:
         request_timeout: Per-HTTP-request timeout seconds.
         log_level: Log level name.
     """
+
     jellyfin_url: str
     jellyfin_api_key: str
     sab_url: str
@@ -94,9 +95,13 @@ class Logger:
     def error(self, msg: str, **kv: Any) -> None:
         self._log("ERROR", msg, **kv)
 
+
 # ---------- Jellyfin ----------
 
-def jellyfin_active_playback(cfg: Config, log: Logger) -> tuple[bool, list[dict[str, Any]]]:
+
+def jellyfin_active_playback(
+    cfg: Config, log: Logger
+) -> tuple[bool, list[dict[str, Any]]]:
     """Check if any Jellyfin session indicates active playback.
 
     A session counts as 'playing' when:
@@ -110,7 +115,9 @@ def jellyfin_active_playback(cfg: Config, log: Logger) -> tuple[bool, list[dict[
     headers = {"X-Emby-Token": cfg.jellyfin_api_key, "Accept": "application/json"}
 
     try:
-        r = requests.get(url, headers=headers, timeout=cfg.request_timeout, verify=cfg.verify_tls)
+        r = requests.get(
+            url, headers=headers, timeout=cfg.request_timeout, verify=cfg.verify_tls
+        )
         r.raise_for_status()
         sessions: list[dict[str, Any]] = r.json() or []
     except Exception as e:
@@ -135,29 +142,35 @@ def jellyfin_active_playback(cfg: Config, log: Logger) -> tuple[bool, list[dict[
         # Effective decision:
         watching = is_playing or (cfg.include_paused and (is_paused or is_buffering))
 
-        summaries.append({
-            "user": s.get("UserName") or s.get("UserId"),
-            "client": s.get("Client"),
-            "item": now.get("Name") if isinstance(now, dict) else None,
-            "is_playing": is_playing,
-            "is_paused": is_paused,
-            "is_buffering": is_buffering,
-            "watching": watching,
-        })
+        summaries.append(
+            {
+                "user": s.get("UserName") or s.get("UserId"),
+                "client": s.get("Client"),
+                "item": now.get("Name") if isinstance(now, dict) else None,
+                "is_playing": is_playing,
+                "is_paused": is_paused,
+                "is_buffering": is_buffering,
+                "watching": watching,
+            }
+        )
 
         if watching:
             any_active = True
 
     return any_active, summaries
 
+
 # ---------- SABnzbd ----------
 
-def sab_global_state(cfg: Config, log: Logger) -> Dict[str, Any]:
-    """Return SABnzbd queue state; includes 'paused' (bool), 'speed' (float kb/s), and 'speedlimit' (int KB/s)."""
+
+def sab_global_state(cfg: Config, log: Logger) -> dict:
+    """Return SABnzbd queue state; paused flag, speed (KB/s), and speedlimit percent."""
     url = f"{cfg.sab_url.rstrip('/')}/sabnzbd/api"
     params = {"mode": "queue", "output": "json", "apikey": cfg.sab_api_key}
     try:
-        r = requests.get(url, params=params, timeout=cfg.request_timeout, verify=cfg.verify_tls)
+        r = requests.get(
+            url, params=params, timeout=cfg.request_timeout, verify=cfg.verify_tls
+        )
         r.raise_for_status()
         data = r.json() or {}
     except Exception as e:
@@ -165,37 +178,42 @@ def sab_global_state(cfg: Config, log: Logger) -> Dict[str, Any]:
         return {}
 
     q = data.get("queue") or {}
+
     paused = q.get("paused")
     if paused is None:
         status_text = (q.get("status") or "").lower()
-        if status_text:
-            paused = status_text == "paused"
+        paused = (status_text == "paused") if status_text else None
 
-    kbpersec = q.get("kbpersec")
+    # current speed
     try:
-        speed = float(kbpersec) if kbpersec is not None else 0.0
+        speed = float(q.get("kbpersec", 0.0))
     except (TypeError, ValueError):
         speed = 0.0
 
-    # Speed limit comes back as string or int; normalize to int KB/s
-    raw_limit = q.get("speedlimit", 0)
+    # percent from SAB; fall back to 100 if missing
     try:
-        speedlimit = int(raw_limit)
-    except (TypeError, ValueError):
-        speedlimit = 0
+        speedlimit_pct = int(str(q.get("speedlimit", 100)))
+    except Exception:
+        speedlimit_pct = 100
 
     return {
-        "paused": bool(paused) if paused is not None else None,
+        "paused": paused if isinstance(paused, bool) else None,
         "speed": speed,
-        "speedlimit": speedlimit,
+        "speedlimit_pct": speedlimit_pct,
     }
+
 
 def sab_set_pause(cfg: Config, log: Logger, pause: bool) -> bool:
     """Pause or resume SABnzbd; returns True on HTTP OK."""
     url = f"{cfg.sab_url.rstrip('/')}/sabnzbd/api"
     mode = "pause" if pause else "resume"
     try:
-        r = requests.get(url, params={"mode": mode, "apikey": cfg.sab_api_key}, timeout=cfg.request_timeout, verify=cfg.verify_tls)
+        r = requests.get(
+            url,
+            params={"mode": mode, "apikey": cfg.sab_api_key},
+            timeout=cfg.request_timeout,
+            verify=cfg.verify_tls,
+        )
         r.raise_for_status()
         log.info("SABnzbd state change requested", action=mode)
         return True
@@ -205,6 +223,7 @@ def sab_set_pause(cfg: Config, log: Logger, pause: bool) -> bool:
 
 
 # ---------- Loop ----------
+
 
 def run(cfg: Config) -> None:
     """Main polling loop; intended to run as PID 1 in the container."""
@@ -217,9 +236,11 @@ def run(cfg: Config) -> None:
     )
 
     stop = {"flag": False}
+
     def _handler(signum, frame) -> None:
         stop["flag"] = True
         log.info("Signal received, exiting", signum=signum)
+
     signal.signal(signal.SIGINT, _handler)
     signal.signal(signal.SIGTERM, _handler)
 
@@ -227,23 +248,28 @@ def run(cfg: Config) -> None:
     last_state: Optional[bool] = None  # True=paused, False=running, None=unknown
 
     while not stop["flag"]:
+        # 1. Query Jellyfin sessions
         is_active, details = jellyfin_active_playback(cfg, log)
         if log._lvl <= Logger.LEVELS["DEBUG"]:
             for d in details:
                 log.debug("Session", **d)
 
+        # 2. Query SABnzbd state
         sab_state = sab_global_state(cfg, log)
         sab_paused = bool(sab_state.get("paused")) if sab_state else None
-        sab_speedlimit = int(sab_state.get("speedlimit", 0)) if sab_state else 0
+        sab_speedlimit_pct = sab_state.get("speedlimit_pct", 100) if sab_state else 100
 
-        # On-the-fly override: if user set a speed limit in SAB GUI, skip auto-pause.
-        # Any limit > 0 means "let it download while watching."
-        if is_active and sab_speedlimit > 0:
+        # 3. If Jellyfin active and SAB slider ≠ 100%, treat as override
+        if is_active and sab_speedlimit_pct != 100:
             idle_accum = 0
-            log.info("User override: SAB speed limit set, skipping auto-pause", speedlimit_kbps=sab_speedlimit)
+            log.info(
+                "User override: SAB speed not at 100%, skipping auto-pause",
+                speedlimit_pct=sab_speedlimit_pct,
+            )
             time.sleep(cfg.interval)
             continue
 
+        # 4. Auto-pause logic
         if is_active:
             idle_accum = 0
             if sab_paused is False or (sab_paused is None and last_state is not True):
@@ -256,7 +282,6 @@ def run(cfg: Config) -> None:
             idle_accum += cfg.interval
             log.debug("No active playback", idle_seconds=idle_accum)
             if idle_accum >= cfg.resume_cooldown:
-                # Ensure resume even if state read was inconclusive.
                 if sab_paused is not False:
                     sab_set_pause(cfg, log, pause=False)
                     last_state = False
@@ -266,33 +291,57 @@ def run(cfg: Config) -> None:
 
         time.sleep(cfg.interval)
 
+
 def parse_args() -> Config:
     """Parse CLI args and environment variables into a Config."""
     env = os.environ
 
     def env_bool(name: str, default: bool) -> bool:
         v = env.get(name)
-        return default if v is None else v.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return (
+            default
+            if v is None
+            else v.strip().lower() in {"1", "true", "yes", "y", "on"}
+        )
 
-    p = argparse.ArgumentParser(description="Pause SABnzbd when Jellyfin is playing (polling).")
+    p = argparse.ArgumentParser(
+        description="Pause SABnzbd when Jellyfin is playing (polling)."
+    )
     p.add_argument("--jellyfin-url", default=env.get("JELLYFIN_URL"))
     p.add_argument("--jellyfin-api-key", default=env.get("JELLYFIN_API_KEY"))
     p.add_argument("--sab-url", default=env.get("SAB_URL"))
     p.add_argument("--sab-api-key", default=env.get("SAB_API_KEY"))
     p.add_argument("--interval", type=int, default=int(env.get("INTERVAL", "30")))
-    p.add_argument("--resume-cooldown", type=int, default=int(env.get("RESUME_COOLDOWN", "60")))
-    p.add_argument("--include-paused", action="store_true", default=env_bool("INCLUDE_PAUSED", False))
-    p.add_argument("--no-verify-tls", dest="verify_tls", action="store_false", default=env_bool("VERIFY_TLS", True))
-    p.add_argument("--request-timeout", type=int, default=int(env.get("REQUEST_TIMEOUT", "8")))
+    p.add_argument(
+        "--resume-cooldown", type=int, default=int(env.get("RESUME_COOLDOWN", "60"))
+    )
+    p.add_argument(
+        "--include-paused",
+        action="store_true",
+        default=env_bool("INCLUDE_PAUSED", False),
+    )
+    p.add_argument(
+        "--no-verify-tls",
+        dest="verify_tls",
+        action="store_false",
+        default=env_bool("VERIFY_TLS", True),
+    )
+    p.add_argument(
+        "--request-timeout", type=int, default=int(env.get("REQUEST_TIMEOUT", "8"))
+    )
     p.add_argument("--log-level", default=env.get("LOG_LEVEL", "INFO"))
     args = p.parse_args()
 
-    missing = [k for k, v in {
-        "JELLYFIN_URL": args.jellyfin_url,
-        "JELLYFIN_API_KEY": args.jellyfin_api_key,
-        "SAB_URL": args.sab_url,
-        "SAB_API_KEY": args.sab_api_key,
-    }.items() if not v]
+    missing = [
+        k
+        for k, v in {
+            "JELLYFIN_URL": args.jellyfin_url,
+            "JELLYFIN_API_KEY": args.jellyfin_api_key,
+            "SAB_URL": args.sab_url,
+            "SAB_API_KEY": args.sab_api_key,
+        }.items()
+        if not v
+    ]
     if missing:
         print(f"ERROR Missing configuration: {', '.join(missing)}", file=sys.stderr)
         sys.exit(2)
