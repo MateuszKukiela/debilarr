@@ -30,6 +30,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -64,7 +65,7 @@ class Config:
 
 
 class Logger:
-    """Minimal stdout logger with levels."""
+    """Minimal stdout logger with levels and timestamped output."""
 
     LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 
@@ -74,48 +75,64 @@ class Logger:
     def _log(self, level: str, msg: str, **kv: Any) -> None:
         if self.LEVELS[level] < self._lvl:
             return
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         extra = " ".join(f"{k}={v}" for k, v in kv.items())
-        print(f"{level} {msg}{(' | ' + extra) if extra else ''}", flush=True)
+        line = f"{ts} {level} {msg}"
+        if extra:
+            line += " | " + extra
+        print(line, flush=True)
 
-    def debug(self, msg: str, **kv: Any) -> None: self._log("DEBUG", msg, **kv)
-    def info(self, msg: str, **kv: Any) -> None: self._log("INFO", msg, **kv)
-    def warn(self, msg: str, **kv: Any) -> None: self._log("WARN", msg, **kv)
-    def error(self, msg: str, **kv: Any) -> None: self._log("ERROR", msg, **kv)
+    def debug(self, msg: str, **kv: Any) -> None:
+        self._log("DEBUG", msg, **kv)
 
+    def info(self, msg: str, **kv: Any) -> None:
+        self._log("INFO", msg, **kv)
+
+    def warn(self, msg: str, **kv: Any) -> None:
+        self._log("WARN", msg, **kv)
+
+    def error(self, msg: str, **kv: Any) -> None:
+        self._log("ERROR", msg, **kv)
 
 # ---------- Jellyfin ----------
 
-def jellyfin_active_playback(cfg: Config, log: Logger) -> Tuple[bool, List[Dict[str, Any]]]:
+def jellyfin_active_playback(cfg: Config, log: Logger) -> tuple[bool, list[dict[str, Any]]]:
     """Check if any Jellyfin session indicates active playback.
 
-    Args:
-        cfg: Runtime configuration.
-        log: Logger.
+    A session counts as 'playing' when:
+      - NowPlayingItem is present,
+      - PlayState.IsPaused is False (or missing),
+      - PlayState.IsBuffering is False (or missing).
 
-    Returns:
-        Tuple (any_active, session_summaries).
+    If cfg.include_paused is True, then paused/buffering also count as 'watching'.
     """
     url = f"{cfg.jellyfin_url.rstrip('/')}/Sessions"
     headers = {"X-Emby-Token": cfg.jellyfin_api_key, "Accept": "application/json"}
+
     try:
         r = requests.get(url, headers=headers, timeout=cfg.request_timeout, verify=cfg.verify_tls)
         r.raise_for_status()
-        sessions: List[Dict[str, Any]] = r.json() or []
+        sessions: list[dict[str, Any]] = r.json() or []
     except Exception as e:
         log.error("Jellyfin sessions fetch failed", err=repr(e), url=url)
         return False, []
 
     any_active = False
-    summaries: List[Dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
 
     for s in sessions:
         now = s.get("NowPlayingItem")
         if not now:
             continue
+
         ps = s.get("PlayState") or {}
-        is_playing = bool(ps.get("IsPlaying") or ps.get("IsVideoPaused") is False)
-        is_paused = bool(ps.get("IsPaused") or ps.get("IsVideoPaused"))
-        is_buffering = bool(ps.get("IsBuffering"))
+        is_paused = bool(ps.get("IsPaused", False) or ps.get("IsVideoPaused", False))
+        is_buffering = bool(ps.get("IsBuffering", False))
+
+        # Playing = we have an item, and it's neither paused nor buffering
+        is_playing = (not is_paused) and (not is_buffering)
+
+        # Effective decision:
         watching = is_playing or (cfg.include_paused and (is_paused or is_buffering))
 
         summaries.append({
@@ -127,26 +144,42 @@ def jellyfin_active_playback(cfg: Config, log: Logger) -> Tuple[bool, List[Dict[
             "is_buffering": is_buffering,
             "watching": watching,
         })
+
         if watching:
             any_active = True
 
     return any_active, summaries
 
-
 # ---------- SABnzbd ----------
 
 def sab_global_state(cfg: Config, log: Logger) -> Dict[str, Any]:
-    """Return SABnzbd global state; empty dict on failure."""
+    """Return SABnzbd queue state; includes 'paused' (bool) and 'speed' (float kb/s) if available."""
     url = f"{cfg.sab_url.rstrip('/')}/sabnzbd/api"
-    params = {"mode": "globalstat", "output": "json", "apikey": cfg.sab_api_key}
+    params = {"mode": "queue", "output": "json", "apikey": cfg.sab_api_key}
     try:
         r = requests.get(url, params=params, timeout=cfg.request_timeout, verify=cfg.verify_tls)
         r.raise_for_status()
-        return r.json() or {}
+        data = r.json() or {}
     except Exception as e:
-        log.error("SABnzbd globalstat failed", err=repr(e), url=url)
+        log.error("SABnzbd queue fetch failed", err=repr(e), url=url)
         return {}
 
+    # Normalize into a compact dict our loop expects.
+    q = data.get("queue") or {}
+    paused = q.get("paused")
+    if paused is None:
+        # Fallback for old/edge cases: infer from textual status.
+        status_text = (q.get("status") or "").lower()
+        if status_text:
+            paused = status_text == "paused"
+
+    kbpersec = q.get("kbpersec")
+    try:
+        speed = float(kbpersec) if kbpersec is not None else 0.0
+    except (TypeError, ValueError):
+        speed = 0.0
+
+    return {"paused": bool(paused) if paused is not None else None, "speed": speed}
 
 def sab_set_pause(cfg: Config, log: Logger, pause: bool) -> bool:
     """Pause or resume SABnzbd; returns True on HTTP OK."""
