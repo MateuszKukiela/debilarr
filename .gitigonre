@@ -1,0 +1,17 @@
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# macOS folder attributes
+Icon?
+._*
+
+# macOS resource forks
+.Spotlight-V100
+.Trashes
+
+# PyCharm project files
+.idea/
+*.iml
+*.iws
