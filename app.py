@@ -153,7 +153,7 @@ def jellyfin_active_playback(cfg: Config, log: Logger) -> tuple[bool, list[dict[
 # ---------- SABnzbd ----------
 
 def sab_global_state(cfg: Config, log: Logger) -> Dict[str, Any]:
-    """Return SABnzbd queue state; includes 'paused' (bool) and 'speed' (float kb/s) if available."""
+    """Return SABnzbd queue state; includes 'paused' (bool), 'speed' (float kb/s), and 'speedlimit' (int KB/s)."""
     url = f"{cfg.sab_url.rstrip('/')}/sabnzbd/api"
     params = {"mode": "queue", "output": "json", "apikey": cfg.sab_api_key}
     try:
@@ -164,11 +164,9 @@ def sab_global_state(cfg: Config, log: Logger) -> Dict[str, Any]:
         log.error("SABnzbd queue fetch failed", err=repr(e), url=url)
         return {}
 
-    # Normalize into a compact dict our loop expects.
     q = data.get("queue") or {}
     paused = q.get("paused")
     if paused is None:
-        # Fallback for old/edge cases: infer from textual status.
         status_text = (q.get("status") or "").lower()
         if status_text:
             paused = status_text == "paused"
@@ -179,7 +177,18 @@ def sab_global_state(cfg: Config, log: Logger) -> Dict[str, Any]:
     except (TypeError, ValueError):
         speed = 0.0
 
-    return {"paused": bool(paused) if paused is not None else None, "speed": speed}
+    # Speed limit comes back as string or int; normalize to int KB/s
+    raw_limit = q.get("speedlimit", 0)
+    try:
+        speedlimit = int(raw_limit)
+    except (TypeError, ValueError):
+        speedlimit = 0
+
+    return {
+        "paused": bool(paused) if paused is not None else None,
+        "speed": speed,
+        "speedlimit": speedlimit,
+    }
 
 def sab_set_pause(cfg: Config, log: Logger, pause: bool) -> bool:
     """Pause or resume SABnzbd; returns True on HTTP OK."""
@@ -200,9 +209,13 @@ def sab_set_pause(cfg: Config, log: Logger, pause: bool) -> bool:
 def run(cfg: Config) -> None:
     """Main polling loop; intended to run as PID 1 in the container."""
     log = Logger(cfg.log_level)
-    log.info("Starting polling", interval=cfg.interval, resume_cooldown=cfg.resume_cooldown, include_paused=cfg.include_paused)
+    log.info(
+        "Starting polling",
+        interval=cfg.interval,
+        resume_cooldown=cfg.resume_cooldown,
+        include_paused=cfg.include_paused,
+    )
 
-    # Graceful shutdown
     stop = {"flag": False}
     def _handler(signum, frame) -> None:
         stop["flag"] = True
@@ -221,26 +234,37 @@ def run(cfg: Config) -> None:
 
         sab_state = sab_global_state(cfg, log)
         sab_paused = bool(sab_state.get("paused")) if sab_state else None
+        sab_speedlimit = int(sab_state.get("speedlimit", 0)) if sab_state else 0
+
+        # On-the-fly override: if user set a speed limit in SAB GUI, skip auto-pause.
+        # Any limit > 0 means "let it download while watching."
+        if is_active and sab_speedlimit > 0:
+            idle_accum = 0
+            log.info("User override: SAB speed limit set, skipping auto-pause", speedlimit_kbps=sab_speedlimit)
+            time.sleep(cfg.interval)
+            continue
 
         if is_active:
             idle_accum = 0
             if sab_paused is False or (sab_paused is None and last_state is not True):
                 sab_set_pause(cfg, log, pause=True)
                 last_state = True
+                log.info("Paused SAB due to active playback")
             else:
                 log.debug("Already paused; no action")
         else:
             idle_accum += cfg.interval
             log.debug("No active playback", idle_seconds=idle_accum)
             if idle_accum >= cfg.resume_cooldown:
-                if sab_paused is True or (sab_paused is None and last_state is not False):
+                # Ensure resume even if state read was inconclusive.
+                if sab_paused is not False:
                     sab_set_pause(cfg, log, pause=False)
                     last_state = False
+                    log.info("Idle threshold reached; resuming SAB")
                 else:
                     log.debug("Already running; no action")
 
         time.sleep(cfg.interval)
-
 
 def parse_args() -> Config:
     """Parse CLI args and environment variables into a Config."""
