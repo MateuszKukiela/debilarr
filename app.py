@@ -9,7 +9,7 @@ Behavior:
 
 Configuration (env vars, or CLI flags override):
     JELLYFIN_URL       Base URL to Jellyfin, e.g., http://jellyfin:8096
-    JELLYFIN_API_KEY   Jellyfin API key (X-Emby-Token)
+    JELLYFIN_API_KEY   Jellyfin API key (Dashboard > API Keys)
     SAB_URL            Base URL to SABnzbd, e.g., http://sabnzbd:8080
     SAB_API_KEY        SABnzbd API key
     INTERVAL           Poll interval seconds (default: 30)
@@ -42,7 +42,7 @@ class Config:
 
     Attributes:
         jellyfin_url: Jellyfin base URL.
-        jellyfin_api_key: Jellyfin API key (X-Emby-Token).
+        jellyfin_api_key: Jellyfin API key (Dashboard > API Keys).
         sab_url: SABnzbd base URL.
         sab_api_key: SABnzbd API key.
         interval: Polling interval in seconds.
@@ -112,7 +112,11 @@ def jellyfin_active_playback(
     If cfg.include_paused is True, then paused/buffering also count as 'watching'.
     """
     url = f"{cfg.jellyfin_url.rstrip('/')}/Sessions"
-    headers = {"X-Emby-Token": cfg.jellyfin_api_key, "Accept": "application/json"}
+    # Recent Jellyfin (12.x) answers 401 to the legacy X-Emby-Token header.
+    headers = {
+        "Authorization": f'MediaBrowser Token="{cfg.jellyfin_api_key}"',
+        "Accept": "application/json",
+    }
 
     try:
         r = requests.get(

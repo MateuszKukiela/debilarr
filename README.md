@@ -20,7 +20,7 @@ docker run -d --name debilarr \
   -e RESUME_COOLDOWN=60 \
   -e INCLUDE_PAUSED=false \
   -e LOG_LEVEL=INFO \
-  mateuszkukiela/debilarr:latest
+  ghcr.io/mateuszkukiela/debilarr:latest
 ```
 
 ### Docker Compose
@@ -30,7 +30,7 @@ version: "3.8"
 
 services:
   debilarr:
-    image: mateuszkukiela/debilarr:latest
+    image: ghcr.io/mateuszkukiela/debilarr:latest
     container_name: debilarr
     restart: unless-stopped
     environment:
@@ -147,13 +147,7 @@ Use **internal** URLs for reliability. Avoid public reverse proxies/CDNs for the
 
 ## Build and push (contributors)
 
-```bash
-# Multi-arch build (amd64 + arm64)
-docker buildx create --use --name debilarr-builder
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -t mateuszkukiela/debilarr:latest \
-  --push .
-```
+Every push to `master` builds `ghcr.io/mateuszkukiela/debilarr:latest`
+(linux/amd64) with GitHub Actions, see `.github/workflows/docker.yml`.
 
 ---
