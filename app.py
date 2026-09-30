@@ -249,7 +249,19 @@ def run(cfg: Config) -> None:
     signal.signal(signal.SIGTERM, _handler)
 
     idle_accum = 0
-    last_state: Optional[bool] = None  # True=paused, False=running, None=unknown
+    # True only while SAB is paused by us. A marker file keeps that across a
+    # container restart, so a pause we set is still ours to lift afterwards.
+    state_file = os.environ.get("STATE_FILE", "/tmp/debilarr.paused")
+    last_state: Optional[bool] = True if os.path.exists(state_file) else None
+
+    def remember(paused: bool) -> None:
+        try:
+            if paused:
+                open(state_file, "w").close()
+            elif os.path.exists(state_file):
+                os.remove(state_file)
+        except OSError as e:
+            log.warn("Could not update state file", err=repr(e), path=state_file)
 
     while not stop["flag"]:
         # 1. Query Jellyfin sessions
@@ -279,6 +291,7 @@ def run(cfg: Config) -> None:
             if sab_paused is False or (sab_paused is None and last_state is not True):
                 sab_set_pause(cfg, log, pause=True)
                 last_state = True
+                remember(True)
                 log.info("Paused SAB due to active playback")
             else:
                 log.debug("Already paused; no action")
@@ -286,12 +299,19 @@ def run(cfg: Config) -> None:
             idle_accum += cfg.interval
             log.debug("No active playback", idle_seconds=idle_accum)
             if idle_accum >= cfg.resume_cooldown:
-                if sab_paused is not False:
+                # Only lift a pause we set: a manual pause, or SAB pausing itself
+                # for low disk space, is left alone.
+                if last_state is True and sab_paused is not False:
                     sab_set_pause(cfg, log, pause=False)
                     last_state = False
+                    remember(False)
                     log.info("Idle threshold reached; resuming SAB")
+                elif last_state is True:
+                    last_state = False
+                    remember(False)
+                    log.debug("SAB already running again; forgetting our pause")
                 else:
-                    log.debug("Already running; no action")
+                    log.debug("Not our pause (or not paused); no action")
 
         time.sleep(cfg.interval)
 
